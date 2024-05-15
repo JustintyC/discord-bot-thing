@@ -1,0 +1,4 @@
+node_modules
+.env
+bot.py
+err.log
