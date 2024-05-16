@@ -93,8 +93,12 @@ async function game(client, channel) {
     while(alive_players >= 2 && mafiaAlive) { // should be > 2, >= 2 for testing
         // night: prompt mafia to kill someone & handle player actions
         // other roles may be added in the future
+        channel.send(messageEmbed("It is nighttime, and everyone goes to sleep. Meanwhile, the mafia takes action..."));
         const victim = await mafiaKillPrompt(mafiaUsername, client);
-        console.log("killpromptover");
+
+
+        // day
+        channel.send(messageEmbed("The sun has risen!"));
         handleActions({
             mafiaKill: victim,
         }, channel);
@@ -139,6 +143,7 @@ async function mafiaKillPrompt(mafiaUsername, client) {
         return m.author == mafiaUser;
     };
 
+    // keep prompting the user until a valid username of an alive player or "skip" is provided
     while (!((playerInGame(output) && (getUserStatus(output) == "alive")) || output == "skip")) {
         await channel.awaitMessages({
             filter,
@@ -151,7 +156,7 @@ async function mafiaKillPrompt(mafiaUsername, client) {
             if (!playerInGame(output) && output != "skip") {
                 client.users.send(getUserId(mafiaUsername), "Please enter a valid username (not global name!).");
             }
-            console.log(`player entered ${output}`);
+            console.log(`mafia entered ${output}`);
         })
         .catch(() => { 
             client.users.send(getUserId(mafiaUsername), "Timeout - your turn has been skipped. You didn't kill anyone tonight.");
@@ -262,9 +267,15 @@ async function voting(client, channel) {
         if (max[0] == "skip" || tie) {
             channel.send(messageEmbed("No one was voted out."));
         } else {
-            channel.send(messageEmbed(`${max[0]} has been voted out.`));
-            playerMap.get(max[0]).status = "dead";
-            alive_players--;
+            const fiftyPercent = alive_players/2;
+            if (max[1] > fiftyPercent) {
+                channel.send(messageEmbed(`${max[0]} has been voted out.`));
+                playerMap.get(max[0]).status = "dead";
+                alive_players--;
+            } else {
+                channel.send(messageEmbed("There were not enough votes to make a decision. No one was voted out."));
+            }
+            
         }
 
     })
