@@ -6,25 +6,19 @@ module.exports = {
         interaction.reply(messageEmbed("Starting a game of Mafia. Do [==mafia join] to join!"))
     },
 
-    mafiaCommandHandler: async function(message, client, command) {
-        switch(command) {
+    mafiaCommandHandler: async function(message, client, args) {
+        switch(args[0]) {
             case "join":
                 mafiaJoinReply(message);
                 break;
             case "start":
                 mafiaStartReply(message, client);
                 break;
+            case "v":
+                break;
             case "debug":
                 // if (!playerInGame(message.author.username)) break;
-                const channel = await message.author.createDM();
-                await channel.awaitMessages({
-                    max: 1,
-                    time: 10_000,
-                })
-                .then((collected) => console.log(collected.first().content))
-                .catch(() => console.log("timeout"));
-
-                console.log("main thread ended");
+                message.reply(messageEmbed(`playerArr: ${playerArr}, game_state: ${game_state}, alive_players: ${alive_players}`))
                 break;
             default:
                 message.reply(messageEmbed("Unknown mafia command. Do [==mafia help] to learn more."))
@@ -35,7 +29,7 @@ module.exports = {
 const EMBED_COLOUR = 0xD3CFBA;
 
 // key: user's username (not globalName)
-// value: { role: ..., status: (alive/dead), }
+// value: { User: JSON object of user, role: ..., status: (alive/dead), }
 let playerMap = new Map();
 
 // an array of players in a mafia game
@@ -46,6 +40,7 @@ let game_state = 0;
 
 // the username of the user who did /mafia to start the game
 let game_author = null;
+let alive_players = 0;
 
 function mafiaJoinReply(message) {
     if (game_state != 1) {
@@ -86,23 +81,25 @@ function mafiaStartReply(message, client) {
     const channel = client.channels.cache.get(message.channelId);
     channel.send(messageEmbed("Starting game!"));
     game_state = 2;
-    game(client);
+    game(client, channel);
 }
 
-async function game(client) {
+async function game(client, channel) {
     let mafiaUsername = gameInitiation(client);
     let mafiaAlive = true;
 
     // game continues as long as there are more than 2 players alive and the mafia is alive
     // i.e. game ends when there are =< 2 players or mafia gets eliminated
-    while(playerArr.length >= 2 && mafiaAlive) { // should be > 2, >= 2 for testing
+    while(alive_players >= 2 && mafiaAlive) { // should be > 2, >= 2 for testing
         // night: prompt mafia to kill someone & handle player actions
         // other roles may be added in the future
         const victim = await mafiaKillPrompt(mafiaUsername, client);
-
+        console.log("killpromptover");
         handleActions({
             mafiaKill: victim,
-        });
+        }, channel);
+
+        await voting(client, channel);
 
         break; // stub
     }
@@ -113,6 +110,7 @@ async function game(client) {
 // assign roles, dm each participant their role
 function gameInitiation(client) {
     let numPlayers = playerArr.length;
+    alive_players = numPlayers;
     let mafiaIdx = random(numPlayers);
     let mafiaUsername = playerArr[mafiaIdx];
     playerMap.get(mafiaUsername).role = "mafia";
@@ -130,7 +128,7 @@ function gameInitiation(client) {
 // if mafia input is not in the player list, prompt again until a valid player username is given
 // if timeout, skip mafia's turn
 // REQUIRES: mafia is a participating user
-// RETURNS: victim's name or "skip"
+// RETURNS: victim's name or null for skip
 async function mafiaKillPrompt(mafiaUsername, client) {
     let output = null;
     const mafiaUser = getUser(mafiaUsername);
@@ -141,7 +139,7 @@ async function mafiaKillPrompt(mafiaUsername, client) {
         return m.author == mafiaUser;
     };
 
-    while (!playerInGame(output) && output != "skip") {
+    while (!((playerInGame(output) && (getUserStatus(output) == "alive")) || output == "skip")) {
         await channel.awaitMessages({
             filter,
             max: 1,
@@ -166,14 +164,113 @@ async function mafiaKillPrompt(mafiaUsername, client) {
         client.users.send(getUserId(mafiaUsername), "You didn't kill anyone tonight.");
         return null;
     } else {
-        client.users.send(getUserId(mafiaUsername), `You decided to kill ${output} tonight.`);
+        if (output == mafiaUsername) {
+            client.users.send(getUserId(mafiaUsername), `You stubbed your toe and died.`);
+        } else {
+            client.users.send(getUserId(mafiaUsername), `You decided to kill ${output} tonight.`);
+        }
         return output;
     }
 }
 
 // handles all player actions that took place during nighttime (kills, etc)
-function handleActions(actions) {
-    
+function handleActions(actions, channel) {
+    victim = actions.mafiaKill;
+
+    if (victim == null) {
+        channel.send(messageEmbed(`No one was killed last night. Start discussing!`));
+    } else {
+        playerMap.get(victim).status = "dead";
+        alive_players--;
+        channel.send(messageEmbed(`${victim} was killed last night. Start discussing!`));        
+    }
+
+    channel.send(messageEmbed("[==mafia v username] to vote to eliminate someone, [==mafia v skip] to abstain. A decision will be made if more than 50% of players voted the same thing."))
+}
+
+// starts player voting
+async function voting(client, channel) {
+    let voteCountMap = new Map();
+    let voteMap = new Map();
+
+    // message must start with ==mafia v
+    // player must not have voted before
+    // On vote: 
+    //      if voted to skip, add 1 tally point to skip
+    //      if voted for anything else (a player),
+    //          1. check if the player is in game and alive
+    //          2. add 1 tally point to that player
+    // once everyone has voted, get the option with the most votes; if the number of votes for that option
+    // is more than 50% of voters, that decision is carried out
+    const filter = (m) => {
+        console.log(m.content);
+        if (!m.content.startsWith("==mafia v ")) return false;
+        if (voteCountMap.get(m.author.id) != null) {
+            m.reply(messageEmbed("You have already voted!"));
+            return false;
+        }
+        if (getUserStatus(m.author.username) != "alive") {
+            m.reply(messageEmbed("You are no longer / not in game."));
+            return false
+        };
+
+        let arg = null;
+        try {
+            arg = m.content.split(" ")[2];
+        } catch (error) {
+            console.log("filter error");
+            return false;
+        }
+
+        if (arg == "skip" || (playerInGame(arg) && getUserStatus(arg) == "alive")) {
+            voteCountMap.set(m.author.id, 1);
+            if (voteMap.get(arg) == null) voteMap.set(arg, 1);
+            else voteMap.set(arg, voteMap.get(arg) + 1);
+            channel.send(messageEmbed(`+1 vote for ${arg}`));
+            return true;
+        } else {
+            m.reply(messageEmbed("Player does not exist / is not in game."));
+            console.log("voted player doesnt exist/not in game");
+            return false;
+        }
+    }
+
+    await channel.awaitMessages({
+        filter,
+        max: alive_players,
+    })
+    .then(() => {
+        channel.send(messageEmbed("Voting complete!"));
+
+        // finds the maximum voted option
+        let max;
+        let tie = false;
+        for (let [key, value] of voteMap) {
+            if (!max) max = [key, value];
+            else {
+                if (max[1] < value) { 
+                    max = [key, value];
+                    tie = false;
+                } else if (max[1] == value) {
+                    tie = true;
+                }
+            }
+        }
+        console.log(max);
+
+        // carries out voted option
+        if (max[0] == "skip" || tie) {
+            channel.send(messageEmbed("No one was voted out."));
+        } else {
+            channel.send(messageEmbed(`${max[0]} has been voted out.`));
+            playerMap.get(max[0]).status = "dead";
+            alive_players--;
+        }
+
+    })
+    .catch(collected => console.log(`error; ${collected}`))
+
+    return 0;
 }
 
 // returns a one-liner embed message object
@@ -196,21 +293,21 @@ function playerInGame(username) {
 }
 
 function getUser(username) {
-    if (!playerInGame(username)) return;
+    if (!playerInGame(username)) return null;
     return playerMap.get(username).user;
 }
 
 function getUserId(username) {
-    if (!playerInGame(username)) return;
+    if (!playerInGame(username)) return null;
     return playerMap.get(username).user.id;
 }
 
 function getUserRole(username) {
-    if (!playerInGame(username)) return;
+    if (!playerInGame(username)) return null;
     return playerMap.get(username).role;
 }
 
 function getUserStatus(username) {
-    if (!playerInGame(username)) return;
+    if (!playerInGame(username)) return null;
     return playerMap.get(username).status;
 }

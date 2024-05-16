@@ -39,7 +39,7 @@ module.exports = {
 
         switch(args.split(" ")[0]) {
             case "mafia":
-                mafiaCommandHandler(message, client, message.content.split(" ")[1]);
+                mafiaCommandHandler(message, client, message.content.split(" ").slice(1, ));
                 break;
             default:
                 message.reply(messageEmbed("Unknown command."));
