@@ -1,9 +1,28 @@
 module.exports = {
     mafiaReply: function(interaction, client) {
+        if (game_state != 0) {
+            interaction.reply(messageEmbed("There is an ongoing game right now!"));
+            return;
+        }
+
+        // resetting globals
+        playerMap = new Map();
+        playerArr = [];
+        mafia_alive = true;
+        alive_players = 0;
+
         game_state = 1;
         game_author = interaction.user.username;
         const channel = client.channels.cache.get(interaction.channelId);
-        interaction.reply(messageEmbed("Starting a game of Mafia. Do [==mafia join] to join!"))
+        interaction.reply(messageEmbed("Starting a game of Mafia. Do [==mafia join] to join!"));
+
+        // adds the caller to the game
+        playerMap.set(game_author, {
+            user: interaction.user,
+            role: "villager",
+            status: "alive",
+        });
+        playerArr.push(game_author);
     },
 
     mafiaCommandHandler: async function(message, client, args) {
@@ -14,7 +33,10 @@ module.exports = {
             case "start":
                 mafiaStartReply(message, client);
                 break;
-            case "v":
+            case "v": // so that the bot doesn't respond to ==mafia v twice
+                break;
+            case "end":
+                mafiaEndReply(message);
                 break;
             case "debug":
                 // if (!playerInGame(message.author.username)) break;
@@ -41,6 +63,12 @@ let game_state = 0;
 // the username of the user who did /mafia to start the game
 let game_author = null;
 let alive_players = 0;
+let mafia_alive = true;
+
+function mafiaEndReply(message) {
+    game_state = 0;
+    message.reply(messageEmbed("Game ended."));
+}
 
 function mafiaJoinReply(message) {
     if (game_state != 1) {
@@ -54,6 +82,7 @@ function mafiaJoinReply(message) {
         message.reply(messageEmbed("You have already joined!"))
         return;
     }
+
 
     playerMap.set(playerName, {
         user: message.author,
@@ -86,29 +115,53 @@ function mafiaStartReply(message, client) {
 
 async function game(client, channel) {
     let mafiaUsername = gameInitiation(client);
-    let mafiaAlive = true;
 
-    // game continues as long as there are more than 2 players alive and the mafia is alive
-    // i.e. game ends when there are =< 2 players or mafia gets eliminated
-    while(alive_players >= 2 && mafiaAlive) { // should be > 2, >= 2 for testing
+    while(!checkIfGameEnd()) {
         // night: prompt mafia to kill someone & handle player actions
         // other roles may be added in the future
         channel.send(messageEmbed("It is nighttime, and everyone goes to sleep. Meanwhile, the mafia takes action..."));
         const victim = await mafiaKillPrompt(mafiaUsername, client);
 
-
         // day
         channel.send(messageEmbed("The sun has risen!"));
-        handleActions({
-            mafiaKill: victim,
-        }, channel);
+
+        const actions = {
+            mafiaKill: victim
+        }
+
+        handleActions(actions);
+        if(checkIfGameEnd()) break;
+
+        if (victim == null) {
+            channel.send(messageEmbed(`No one was killed last night. Start discussing!`));
+        } else {
+            channel.send(messageEmbed(`${victim} was killed last night. Start discussing!`));        
+        }
+    
+        channel.send(messageEmbed("[==mafia v username] to vote to eliminate someone, [==mafia v skip] to abstain. A decision will be made if more than 50% of players voted the same thing."))
+    
+        
 
         await voting(client, channel);
 
-        break; // stub
     }
+
+    // handle the end of the game
     console.log("game end");
-    
+    if (mafia_alive) {
+        channel.send(messageEmbed("The mafia has killed everyone in town."));
+    } else {
+        channel.send(messageEmbed("The mafia has been eliminated. Villagers win!"));
+    }
+
+    game_state = 0;
+}
+
+// game continues as long as there are more than 2 players alive and the mafia is alive
+// i.e. game ends when there are =< 2 players or mafia gets eliminated
+// returns true if game meets conditions to end
+function checkIfGameEnd() {
+    return alive_players < 2 || !mafia_alive; // should be <= 2, < 2 for testing
 }
 
 // assign roles, dm each participant their role
@@ -179,18 +232,25 @@ async function mafiaKillPrompt(mafiaUsername, client) {
 }
 
 // handles all player actions that took place during nighttime (kills, etc)
-function handleActions(actions, channel) {
+function handleActions(actions) {
     victim = actions.mafiaKill;
 
-    if (victim == null) {
-        channel.send(messageEmbed(`No one was killed last night. Start discussing!`));
-    } else {
-        playerMap.get(victim).status = "dead";
-        alive_players--;
-        channel.send(messageEmbed(`${victim} was killed last night. Start discussing!`));        
-    }
+    if (victim != null) killPlayer(victim);
 
-    channel.send(messageEmbed("[==mafia v username] to vote to eliminate someone, [==mafia v skip] to abstain. A decision will be made if more than 50% of players voted the same thing."))
+    // if (victim == null) {
+    //     channel.send(messageEmbed(`No one was killed last night. Start discussing!`));
+    // } else {
+    //     killPlayer(victim);
+    //     channel.send(messageEmbed(`${victim} was killed last night. Start discussing!`));        
+    // }
+
+    // channel.send(messageEmbed("[==mafia v username] to vote to eliminate someone, [==mafia v skip] to abstain. A decision will be made if more than 50% of players voted the same thing."))
+}
+
+function killPlayer(username) {
+    playerMap.get(username).status = "dead";
+    alive_players--;
+    if (getUserRole(username) == "mafia") mafia_alive = false;
 }
 
 // starts player voting
@@ -270,8 +330,7 @@ async function voting(client, channel) {
             const fiftyPercent = alive_players/2;
             if (max[1] > fiftyPercent) {
                 channel.send(messageEmbed(`${max[0]} has been voted out.`));
-                playerMap.get(max[0]).status = "dead";
-                alive_players--;
+                killPlayer(max[0]);
             } else {
                 channel.send(messageEmbed("There were not enough votes to make a decision. No one was voted out."));
             }
